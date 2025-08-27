@@ -5,4 +5,5 @@ class User(BaseModel):
     email:str
     phone:int
     cgpa:float
+    regno:str
     
