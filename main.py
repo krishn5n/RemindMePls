@@ -4,9 +4,9 @@ import threading
 from models import User
 import asyncio
 import uvicorn
+import time
 
-
-from gmail import Tokens,Gmail
+from gmail import Gmail
 
 
 def run_subscriber():
@@ -28,21 +28,39 @@ async def users(user:User):
         print("Inside the path",user)
         gmail_obj = Gmail(user)
         status = gmail_obj.create_user()
-        gmail_obj.close()
         print("Finished")
         return status
     except Exception as e:
         print(f"There is error {e}")
         return 400
 
-@app.get("/test")
-async def test():
-    print("Works")
-    return
+@app.post("/test")
+async def test(user:User):
+    try:
+        if user.cgpa > 9.00:
+            time.sleep(10)
+
+        gmail_obj = Gmail(user)
+        # gmail_obj.test()
+        gmail_obj.cleanup_duplicate_subscriptions(user.email)
+        return 200
+    except Exception as e:
+        print(f"There is error {e}")
+        return 400
 
 @app.get("/call_watch")
 async def watch():
     return
+
+
+#To remove subscription
+@app.get("/remove")
+async def remove():
+    return
+
+@app.get("/cron")
+async def cron():
+    return 
 
 
 if __name__ == "__main__":
