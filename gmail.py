@@ -1,5 +1,6 @@
 from __future__ import print_function
 import time
+import asyncio
 from sqlalchemy import text
 import os.path
 import random
@@ -19,6 +20,7 @@ from google.auth.transport.requests import Request
 from sqlalchemy import create_engine, text
 import redis
 
+from AI import ProcessMail
 
 load_dotenv()
 
@@ -232,12 +234,14 @@ class Gmail(Tokens):
             if not history:
                 raise Exception("Obtained a new history ID that is smaller than prev")
             msg_id = self.extract_message_ids(history)
-
+            # return
+            print(msg_id)
             for unique_message_id in msg_id:
-                message = self.get_message(unique_message_id,email)
-                subject,body = self.parse_message(message)
-                print(email,subject)
+                # success = self.test(email,unique_message_id)
 
+                obj = ProcessMail()
+                creds = self.refresh(email)
+                print(obj.get_message(message_id=unique_message_id,user_id=email,creds=creds))
             self.update_response(history=historyid,email=email)
             payload.ack()
         except Exception as e:
@@ -277,47 +281,74 @@ class Gmail(Tokens):
         except Exception as e:
             print("There is some error in extracting message_id",e)
             return []
-
-    #Obtaining Messages
-    def get_message(self, message_id, user_id):
+        
+    def test(self,email,msgid):
         try:
-            service = build('gmail', 'v1', credentials=self.refresh(user_id))
-            msg = service.users().messages().get(
-                userId=user_id,
-                id=message_id,
-                format="full"
-            ).execute()
-            return msg
+            creds = self.refresh(email)
+            service = build('gmail', 'v1', credentials=creds)
+            response = service.users().messages().attachments().get(
+                userId=email,
+                messageId=msgid,
+
+            )
         except Exception as e:
-            print(f"Error getting message: {e}")
-            return None
+            print(f"An error occurred: {e}")
+        
 
-    #Parsing Messages
-    def parse_message(self, msg):
-        subject = None
-        body = None
+    #This function will be used for essentially having locks on the Mailid
+    #Make this a call that continues to occur till you get a True -> Ensure
+    async def handle_retry_mechanism(self,email,mailid):
+        try:
+            retrycnt = 3
+            while retrycnt > 0:
+                success = await self.handling_locking(email,mailid)
+                if success: #Has processed
+                    print("Finished handling of locks",email)
+                    return True #Go and process
+                
+                time_to_sleep = random.randint(20,40)
+                print("Sleeping now",email,time_to_sleep)
+                await asyncio.sleep(time_to_sleep)
+                retrycnt-=1
+            print("Following mail id and email did not process",email,mailid)
+            return False
+        except Exception as e:
+            print("Error occured at handle_retry_mechanism",e)
+            return False
 
-        # Extract subject from headers
-        for header in msg["payload"]["headers"]:
-            if header["name"].lower() == "subject":
-                subject = header["value"]
+    async def handling_locking(self,email,mailid):
+        try:
+            if self.redis.sismember(self.redis_key, mailid):
+                print(f"Email '{mailid}' has already been processed so leaving {email}.")
+                return True
+            lock_key = f"lock:{mailid}"
+            lock_acquired = self.redis.set(lock_key, int(time.time()), nx=True, ex=120)
+            if lock_acquired:
+                try:
+                    #Create a code to handle the processing
+                    # self.handle_processing_mail(email,mailid)
+                    print("Obtaining the lock and going to sleep",email,mailid)
+                    await asyncio.sleep(30)
+                    # await asyncio.to_thread(self.handle_cpu_intensive_processing, email, mailid)
+                    print("Woke up and Adding the key",email,mailid)
+                    self.redis.sadd(self.redis_key, mailid)
+                    return True
+                except Exception as e:
+                    print("Error has occured in lock post acquiring",e)
+                    return False
+                finally:
+                    print("Releasing Lock")
+                    self.redis.delete(lock_key)
+            else:
+                print("Lock Not Acquired",email)
+                return False
+        except Exception as e:
+            print("Error in handling Existance of Locks and Mailid",e)
+            return False    
 
-        # Extract body from payload
-        if "parts" in msg["payload"]:
-            for part in msg["payload"]["parts"]:
-                if part["mimeType"] == "text/plain":
-                    body = urlsafe_b64decode(
-                        part["body"]["data"].encode("UTF-8")
-                    ).decode("UTF-8")
-                    break
-        else:
-            # Sometimes the body is directly in payload
-            body = urlsafe_b64decode(
-                msg["payload"]["body"]["data"].encode("UTF-8")
-            ).decode("UTF-8")
+    '''Queries Related -------------------------------------------------------------------------'''
+    '''-------------------------------------------------------------------------'''
 
-        return (subject, body)
-    
     #Provide the latest history from watch the watch response
     def get_start_history(self,email:str):
         try:
@@ -332,60 +363,6 @@ class Gmail(Tokens):
                 return int(ans[0])
         except Exception as e:
             print("Error at the getting start history",e)
-    
-    def test(self):
-        try:
-            if self.redis.ping():
-                print("Successfully connected to Redis.")
-            else:
-                print("Connection failed.")
-        except Exception as e:
-            print(f"An error occurred: {e}")
-        
-
-    #This function will be used for essentially having locks on the Mailid
-    #Make this a call that continues to occur till you get a True -> Ensure
-    def hadle_retry_mechanism(self,email,mailid):
-        retrycnt = 3
-        while retrycnt > 0:
-            if self.handling_locking(self,email,mailid):
-                return #Go and process
-            
-            time_to_sleep = random.randint(120,180)
-            time.sleep(time_to_sleep)
-            retrycnt-=1
-        
-        print("Following mail id and email did not process",email,mailid)
-
-    def handling_locking(self,email,mailid):
-        if self.redis.sismember(self.redis_key, mailid):
-            print(f"Email '{mailid}' has already been processed.")
-            self.check_processed(email,mailid)
-            return True
-        #If lock is not obtained
-        try:
-            lock_key = f"lock:{mailid}"
-            lock_acquired = self.redis_client.set(lock_key, int(time.time()), nx=True, ex=120)
-            if lock_acquired:
-                try:
-                    self.handle_processing_mail(email,mailid)
-                    self.redis_client.sadd(self.redis_key, mailid)
-                    return True
-                except Exception as e:
-                    print("Error has occured in lock post acquiring",e)
-                    return False
-                finally:
-                    self.redis_client.delete(lock_key)
-            else:
-                return False
-        except Exception as e:
-            print("Error in handling Existance of Locks and Mailid",e)
-            return False
-    
-    #Returns the corresponding mail oda processing
-    def handle_processing_mail(self,email,mailid):
-        return
-    
 
 f'''
 Flows

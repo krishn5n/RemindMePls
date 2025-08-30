@@ -4,7 +4,6 @@ import threading
 from models import User
 import asyncio
 import uvicorn
-import time
 
 from gmail import Gmail
 
@@ -37,12 +36,20 @@ async def users(user:User):
 @app.post("/test")
 async def test(user:User):
     try:
-        if user.cgpa > 9.00:
-            time.sleep(10)
-
         gmail_obj = Gmail(user)
-        # gmail_obj.test()
-        gmail_obj.cleanup_duplicate_subscriptions(user.email)
+        process = False
+        print(user.email,"Arrived")
+
+        if user.cgpa > 9.00:
+            process = await gmail_obj.handle_retry_mechanism(user.email,2)
+        else:            
+            await asyncio.sleep(5)
+            print("Now going",user.email)
+            process = await gmail_obj.handle_retry_mechanism(user.email,2)
+
+        print("Finished",user.email,process)
+        # # gmail_obj.test()
+        # gmail_obj.cleanup_duplicate_subscriptions(user.email)
         return 200
     except Exception as e:
         print(f"There is error {e}")
